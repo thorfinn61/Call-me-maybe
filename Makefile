@@ -29,7 +29,7 @@ lint:
 	@echo "$(GREEN)Vérification flake8...$(RESET)"
 	flake8 .
 	@echo "$(GREEN)Vérification mypy...$(RESET)"
-	mypy . --warn-return-any --warn-unused-ignores --ignore-missing-imports \
+	mypy --warn-return-any --warn-unused-ignores --ignore-missing-imports \
 		 --disallow-untyped-defs --check-untyped-defs .
 
 .PHONY: all install run debug clean lint build
