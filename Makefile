@@ -1,4 +1,4 @@
-NAME = src/__main__.py
+MODULE = src
 
 VENV = .venv
 UV = uv
@@ -15,11 +15,11 @@ install:
 
 run:
 	@echo "$(GREEN)Lancement du programme...$(RESET)"
-	$(UV) run python $(NAME)
+	$(UV) run python -m $(MODULE)
 
 debug:
 	@echo "$(GREEN)Mode debug (PDB)...$(RESET)"
-	$(UV) run python -m pdb $(NAME)
+	$(UV) run python -m pdb -m $(MODULE)
 
 clean:
 	@echo "$(GREEN)Nettoyage complet...$(RESET)"
