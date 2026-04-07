@@ -11,7 +11,7 @@ def parse_args():
     parser.add_argument(
         "--functions_definition",
         type=str,
-        default="src/data/input/function_definitions.json"
+        default="src/data/input/functions_definition.json"
     )
 
     parser.add_argument(
@@ -70,4 +70,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-    
