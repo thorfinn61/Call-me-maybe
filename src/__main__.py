@@ -5,6 +5,8 @@ from typing import Any, List
 from pydantic import ValidationError
 
 from src.data_models import FunctionDefinition, PromptInput
+from src.engine import LLMEngine
+from src.decoder import JSONDecoder
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -67,6 +69,16 @@ def main() -> None:
             print(f"Avertissement: Prompt ignoré car invalide: {e}")
 
     print(f"Succès: {len(functions)} fonctions et {len(prompts)} prompts chargés.")
+
+    # --- NOUVEAU CODE ---
+    # On initialise le moteur (il charge le modèle et le vocabulaire)
+    engine = LLMEngine()
+    decoder = JSONDecoder(engine=engine, functions=functions)
+    
+    # On teste sur le premier prompt utilisateur
+    if prompts:
+        first_prompt_text = prompts[0].prompt
+        decoder.generate_function_call(prompt=first_prompt_text)
 
 if __name__ == "__main__":
     main()
