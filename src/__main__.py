@@ -11,6 +11,7 @@ from src.models import FunctionDefinition, PromptInput
 llm = Small_LLM_Model()
 
 def parse_args():
+    """Parse les arguments de la ligne de commande pour spécifier les chemins d'entrée/sortie."""
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--functions_definition",

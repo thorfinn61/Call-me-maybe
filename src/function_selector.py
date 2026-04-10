@@ -3,6 +3,7 @@ from typing import List
 from src.models import FunctionDefinition, PromptInput
 
 def select_function(prompt: PromptInput, functions: List[FunctionDefinition], model) -> str:
+    """Fonction qui rend le nom de fonction correspondant au prompt"""
     menu_texte = "Here are the tools available:\n"
     for func in functions:
         menu_texte += f"- {func.name}: {func.description}\n"
