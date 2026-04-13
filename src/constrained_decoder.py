@@ -1,11 +1,14 @@
 import json
 import math
 import re
+import time
 from typing import Any
 
 import numpy as np
 
 from src.file_handler import load_json
+
+SUPPORTED_PARAM_TYPES = {"string", "number"}
 
 
 class ConstrainedDecoder:
@@ -13,7 +16,10 @@ class ConstrainedDecoder:
 
     def __init__(self, model: Any):
         self.model = model
-        self.vocab = load_json(self.model.get_path_to_vocab_file()) or {}
+        self.vocab = (
+            load_json(self.model.get_path_to_vocab_file())
+            or {}
+        )
 
         self.quote_id = self.model.encode('"').tolist()[0][0]
         self.comma_id = self.model.encode(",").tolist()[0][0]
@@ -29,20 +35,41 @@ class ConstrainedDecoder:
         self.value_buffer = ""
         self.phase = "name_key"
 
-    def decode(self, prompt_text: str, function_name: str, function_parameters_schema: dict) -> str:
+    def decode(
+        self,
+        prompt_text: str,
+        function_name: str,
+        function_parameters_schema: dict[str, Any],
+        max_seconds: float = 8.0,
+    ) -> str:
         input_ids = self.model.encode(
             f"Extract parameters into JSON.\nUser: {prompt_text}\nJSON: "
         ).tolist()[0]
 
         self.param_keys = list(function_parameters_schema.keys())
         self.schema = function_parameters_schema
+
+        for key in self.param_keys:
+            param_type = self._param_type(self.schema[key])
+            if param_type not in SUPPORTED_PARAM_TYPES:
+                raise ValueError(
+                    "type non supporte dans le schema: "
+                    f"{function_name}.{key}={param_type} "
+                    "(types autorises: "
+                    f"{', '.join(sorted(SUPPORTED_PARAM_TYPES))})"
+                )
+
         self.param_index = 0
         self.value_buffer = ""
         self.pending = []
         self.phase = "name_key"
 
         generated = ""
-        for _ in range(500):
+        deadline = time.perf_counter() + max_seconds
+        for _ in range(220):
+            if time.perf_counter() >= deadline:
+                return self._fallback(function_name)
+
             if not self.pending:
                 self._queue_static_tokens(function_name)
 
@@ -74,8 +101,8 @@ class ConstrainedDecoder:
                 generated += text
                 self.value_buffer += text
 
-                # Evite une string infinie si le modele n'emet jamais le guillemet.
-                if len(self.value_buffer) >= 256:
+                # Evite une string infinie si la quote de fin manque.
+                if len(self.value_buffer) >= 64:
                     input_ids.append(self.quote_id)
                     generated += '"'
                     self._advance_param()
@@ -114,7 +141,9 @@ class ConstrainedDecoder:
             return
 
         if self.phase == "name_value":
-            self.pending = self.model.encode(f'{function_name}", "parameters": ').tolist()[0]
+            self.pending = self.model.encode(
+                f'{function_name}", "parameters": '
+            ).tolist()[0]
             self.phase = "params_open"
             return
 
@@ -148,9 +177,11 @@ class ConstrainedDecoder:
 
         if param_type == "number":
             allowed = self.number_ids | {self.comma_id, self.close_brace_id}
-        else:
+        elif param_type == "string":
             allowed = set(self.string_ids)
             allowed.add(self.quote_id)
+        else:
+            raise ValueError(f"type de parametre non supporte: {param_type}")
 
         for tid in allowed:
             if tid < len(logits):
@@ -170,7 +201,11 @@ class ConstrainedDecoder:
     def _collect_number_tokens(self) -> set[int]:
         ids: set[int] = set()
         for text, tid in self.vocab.items():
-            token = text.decode("utf-8", errors="ignore") if isinstance(text, bytes) else str(text)
+            token = (
+                text.decode("utf-8", errors="ignore")
+                if isinstance(text, bytes)
+                else str(text)
+            )
             token = token.strip("Ġ▁ ▂▃▄▅▆▇█")
             if token and all(ch in "0123456789.-+eE" for ch in token):
                 ids.add(tid)
@@ -179,7 +214,11 @@ class ConstrainedDecoder:
     def _collect_string_tokens(self) -> set[int]:
         ids: set[int] = set()
         for text, tid in self.vocab.items():
-            token = text.decode("utf-8", errors="ignore") if isinstance(text, bytes) else str(text)
+            token = (
+                text.decode("utf-8", errors="ignore")
+                if isinstance(text, bytes)
+                else str(text)
+            )
             if tid == self.quote_id:
                 continue
             if '"' in token or "\\" in token or "<|" in token:
@@ -189,17 +228,28 @@ class ConstrainedDecoder:
 
     def _param_type(self, schema_obj: Any) -> str:
         if isinstance(schema_obj, dict):
-            return schema_obj.get("type", "string")
-        return getattr(schema_obj, "type", "string")
+            return str(schema_obj.get("type", "string"))
+        return str(getattr(schema_obj, "type", "string"))
 
     def _is_number(self, value: str) -> bool:
         value = value.strip()
         if not value:
             return False
-        return re.match(r"^[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?$", value) is not None
+        return (
+            re.match(
+                r"^[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?$",
+                value,
+            )
+            is not None
+        )
 
     def _fallback(self, function_name: str) -> str:
         params: dict[str, Any] = {}
         for key in self.param_keys:
-            params[key] = 0 if self._param_type(self.schema[key]) == "number" else ""
-        return json.dumps({"name": function_name, "parameters": params}, ensure_ascii=False)
+            params[key] = (
+                0 if self._param_type(self.schema[key]) == "number" else ""
+            )
+        return json.dumps(
+            {"name": function_name, "parameters": params},
+            ensure_ascii=False,
+        )
