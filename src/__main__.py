@@ -1,6 +1,7 @@
 import argparse
 import json
 import re
+import time
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -11,10 +12,11 @@ from src.file_handler import load_json
 from src.function_selector import select_function
 from src.models import FunctionDefinition, PromptInput
 
+
 def _fix_regex_parameters(prompt: str, params: dict) -> dict:
     """Correction manuelle : le modèle est trop petit pour écrire des Regex lui-même."""
     out = dict(params)
-    
+
     # 1. Retrouver ce qu'il faut modifier (la source) dans les guillemets
     quotes = re.findall(r'"([^"]+)"|\'([^\']+)\'', prompt)
     mots = [m[0] or m[1] for m in quotes]
@@ -29,36 +31,44 @@ def _fix_regex_parameters(prompt: str, params: dict) -> dict:
         cible = re.search(r"\bwith\s+([^\s]+)", prompt, flags=re.IGNORECASE)
         if cible:
             out["replacement"] = cible.group(1).strip("'\"")
-            
+
     elif "vowels" in low:
         out["regex"] = r"[aeiouAEIOU]"
-        cible = re.search(r"\bwith\s+['\"]([^'\"]+)['\"]\s+in\b", prompt, flags=re.IGNORECASE)
+        cible = re.search(
+            r"\bwith\s+['\"]([^'\"]+)['\"]\s+in\b", prompt, flags=re.IGNORECASE)
         if cible:
             out["replacement"] = cible.group(1)
-            
+
     elif "cat" in low and "substitute" in low:
         out["regex"] = r"cat"
-        cible = re.search(r"\bwith\s+['\"]([^'\"]+)['\"]\s+in\b", prompt, flags=re.IGNORECASE)
+        cible = re.search(
+            r"\bwith\s+['\"]([^'\"]+)['\"]\s+in\b", prompt, flags=re.IGNORECASE)
         if cible:
             out["replacement"] = cible.group(1)
 
     return out
 
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Function calling")
-    parser.add_argument("--functions_definition", default="src/data/input/functions_definition.json")
-    parser.add_argument("--input", default="src/data/input/function_calling_tests.json")
-    parser.add_argument("--output", default="src/data/output/function_calling_results.json")
+    parser.add_argument("--functions_definition",
+                        default="src/data/input/functions_definition.json")
+    parser.add_argument(
+        "--input", default="src/data/input/function_calling_tests.json")
+    parser.add_argument(
+        "--output", default="src/data/output/function_calling_results.json")
     return parser.parse_args()
 
+
 def main():
+    start_time = time.perf_counter()
     args = parse_args()
     print("🚀 Lancement du Constrained Decoding Runner...")
 
     # 1. Charger les données (Pydantic verifie la validité des JSON automatiquement)
     raw_functions = load_json(args.functions_definition)
     raw_prompts = load_json(args.input)
-    
+
     if raw_functions is None or raw_prompts is None:
         print("❌ Arrêt du programme : Impossible de continuer avec un fichier JSON invalide ou manquant.")
         return
@@ -74,7 +84,7 @@ def main():
     # 3. Traiter chaque phrase (prompt)
     for i, prompt_data in enumerate(prompts, 1):
         prompt_text = prompt_data.prompt
-        
+
         # Trouver la bonne fonction avec l'IA
         chosen_name = select_function(prompt_data, functions, model)
         func = next((f for f in functions if f.name == chosen_name), None)
@@ -85,14 +95,15 @@ def main():
 
         try:
             # Forcer le modèle à générer un JSON valide qui respecte les paramètres
-            raw_json_str = decoder.decode(prompt_text, func.name, func.parameters)
+            raw_json_str = decoder.decode(
+                prompt_text, func.name, func.parameters)
             parsed_data = json.loads(raw_json_str)
             params = parsed_data.get("parameters", {})
-            
-            # Correction spécifique pour l'outil de Regex 
+
+            # Correction spécifique pour l'outil de Regex
             if func.name == "fn_substitute_string_with_regex":
                 params = _fix_regex_parameters(prompt_text, params)
-            
+
             # Ajouter à la liste des résultats
             output.append({
                 "prompt": prompt_text,
@@ -109,8 +120,10 @@ def main():
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(output, f, indent=2, ensure_ascii=False)
-        
+
     print(f"🎉 Terminé ! Les résultats sont dans {args.output}")
+    print(f"⏱️ Temps total : {time.perf_counter() - start_time:.2f}s")
+
 
 if __name__ == "__main__":
     main()
