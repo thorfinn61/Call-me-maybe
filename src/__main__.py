@@ -3,6 +3,8 @@ import json
 import re
 from pathlib import Path
 
+from pydantic import ValidationError
+
 from llm_sdk.llm_sdk import Small_LLM_Model
 from src.constrained_decoder import ConstrainedDecoder
 from src.file_handler import load_json
@@ -57,6 +59,10 @@ def main():
     raw_functions = load_json(args.functions_definition)
     raw_prompts = load_json(args.input)
     
+    if raw_functions is None or raw_prompts is None:
+        print("❌ Arrêt du programme : Impossible de continuer avec un fichier JSON invalide ou manquant.")
+        return
+
     functions = [FunctionDefinition(**item) for item in raw_functions]
     prompts = [PromptInput(**item) for item in raw_prompts]
 

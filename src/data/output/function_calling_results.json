@@ -3,16 +3,16 @@
     "prompt": "What is the sum of 2 and 3?",
     "name": "fn_add_numbers",
     "parameters": {
-      "a": 2,
-      "b": 3
+      "a": false,
+      "b": false
     }
   },
   {
     "prompt": "What is the sum of 265 and 345?",
     "name": "fn_add_numbers",
     "parameters": {
-      "a": 265,
-      "b": 345
+      "a": false,
+      "b": false
     }
   },
   {
