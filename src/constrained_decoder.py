@@ -1,255 +1,120 @@
 import json
 import math
-import re
-import time
 from typing import Any
-
 import numpy as np
 
 from src.file_handler import load_json
 
-SUPPORTED_PARAM_TYPES = {"string", "number"}
-
-
 class ConstrainedDecoder:
-    """Construit un JSON valide: {"name": ..., "parameters": {...}}."""
+    """Générateur de JSON contraint, simplifié pour être lisible."""
 
     def __init__(self, model: Any):
         self.model = model
-        self.vocab = (
-            load_json(self.model.get_path_to_vocab_file())
-            or {}
-        )
+        
+        # 1. Charger le vocabulaire du modèle
+        raw_vocab = load_json(self.model.get_path_to_vocab_file()) or {}
 
+        # Identifiants (IDs) des tokens importants
         self.quote_id = self.model.encode('"').tolist()[0][0]
         self.comma_id = self.model.encode(",").tolist()[0][0]
-        self.close_brace_id = self.model.encode("}").tolist()[0][0]
+        self.brace_id = self.model.encode("}").tolist()[0][0]
 
-        self.number_ids = self._collect_number_tokens()
-        self.string_ids = self._collect_string_tokens()
+        # 2. Trier le vocabulaire pour isoler les nombres et le texte
+        self.number_ids = set()
+        self.string_ids = set()
 
-        self.pending: list[int] = []
-        self.param_keys: list[str] = []
-        self.schema: dict[str, Any] = {}
-        self.param_index = 0
-        self.value_buffer = ""
-        self.phase = "name_key"
+        for text_bytes, tid in raw_vocab.items():
+            # Nettoyer le format du texte renvoyé par le tokenizer
+            text = text_bytes.decode("utf-8", "ignore") if isinstance(text_bytes, bytes) else str(text_bytes)
+            text_propre = text.strip("Ġ▁ ▂▃▄▅▆▇█") # Retire les espaces spéciaux
+            
+            # Est-ce un nombre ? (Ne contient que des chiffres ou notation scientifique)
+            if text_propre and all(c in "0123456789.-+eE" for c in text_propre):
+                self.number_ids.add(tid)
+            # Sinon c'est du texte standard (on rejette juste les guillemets ou symboles système)
+            elif '"' not in text and "\\" not in text and "<|" not in text:
+                self.string_ids.add(tid)
 
-    def decode(
-        self,
-        prompt_text: str,
-        function_name: str,
-        function_parameters_schema: dict[str, Any],
-        max_seconds: float = 8.0,
-    ) -> str:
-        input_ids = self.model.encode(
-            f"Extract parameters into JSON.\nUser: {prompt_text}\nJSON: "
-        ).tolist()[0]
 
-        self.param_keys = list(function_parameters_schema.keys())
-        self.schema = function_parameters_schema
+    def decode(self, prompt_text: str, function_name: str, schema: dict[str, Any]) -> str:
+        """Génère le JSON pas à pas pour la fonction."""
+        
+        # --- ETAPE 1: Initialiser la phrase avec le début du JSON ---
+        texte_genere = f'{{"name": "{function_name}", "parameters": {{'
+        phrase_initiale = f"Extract parameters into JSON.\nUser: {prompt_text}\nJSON: {texte_genere}"
+        input_ids = self.model.encode(phrase_initiale).tolist()[0]
+        
+        cles_attendues = list(schema.keys())
 
-        for key in self.param_keys:
-            param_type = self._param_type(self.schema[key])
-            if param_type not in SUPPORTED_PARAM_TYPES:
-                raise ValueError(
-                    "type non supporte dans le schema: "
-                    f"{function_name}.{key}={param_type} "
-                    "(types autorises: "
-                    f"{', '.join(sorted(SUPPORTED_PARAM_TYPES))})"
-                )
+        # --- ETAPE 2: Générer chaque paramètre un par un ---
+        for i, nom_param in enumerate(cles_attendues):
+            
+            # Ajouter une virgule s'il y a des paramètres précédents
+            if i > 0:
+                texte_genere += ', '
+                input_ids.extend(self.model.encode(", ").tolist()[0])
+                
+            # Vérifier le type attendu
+            type_attendu = schema[nom_param].get("type", "string") if isinstance(schema[nom_param], dict) else getattr(schema[nom_param], "type", "string")
+            est_nombre = type_attendu in ["number", "integer", "float"]
 
-        self.param_index = 0
-        self.value_buffer = ""
-        self.pending = []
-        self.phase = "name_key"
+            # Préparer la clé du tableau: "mon_parametre": 
+            texte_cle = f'"{nom_param}": '
+            if not est_nombre:
+                texte_cle += '"' # On ouvre les guillemets si on n'attend pas un nombre !
+                
+            texte_genere += texte_cle
+            input_ids.extend(self.model.encode(texte_cle).tolist()[0])
 
-        generated = ""
-        deadline = time.perf_counter() + max_seconds
-        for _ in range(220):
-            if time.perf_counter() >= deadline:
-                return self._fallback(function_name)
-
-            if not self.pending:
-                self._queue_static_tokens(function_name)
-
-            if not self.pending and self.phase == "done":
-                break
-
-            logits = self.model.get_logits_from_input_ids(input_ids)
-
-            if self.pending:
-                chosen_id = self._pick_forced(logits, self.pending.pop(0))
-                text = self.model.decode([chosen_id])
-                input_ids.append(chosen_id)
-                generated += text
-                continue
-
-            param_name = self.param_keys[self.param_index]
-            param_type = self._param_type(self.schema[param_name])
-            chosen_id = self._pick_dynamic(logits, param_type)
-            text = self.model.decode([chosen_id])
-
-            if param_type == "string":
-                if chosen_id == self.quote_id:
-                    input_ids.append(chosen_id)
-                    generated += '"'
-                    self._advance_param()
-                    continue
-
-                input_ids.append(chosen_id)
-                generated += text
-                self.value_buffer += text
-
-                # Evite une string infinie si la quote de fin manque.
-                if len(self.value_buffer) >= 64:
+            # --- ETAPE 3: Laisser le modèle deviner la valeur (avec triche/masque) ---
+            valeur_courante = ""
+            
+            # On boucle pour générer les tokens (limite à 60 tokens par paramètre pour éviter l'infini)
+            for _ in range(60):
+                logits = self.model.get_logits_from_input_ids(input_ids)
+                
+                # Masque : on met toutes les probabilités à "-infini" (interdit)
+                masque = [-math.inf] * len(logits)
+                
+                # On autorise seulement la liste qu'on veut
+                if est_nombre:
+                    autorises = self.number_ids | {self.comma_id, self.brace_id}
+                else:
+                    autorises = self.string_ids | {self.quote_id}
+                    
+                # Restaurer la probabilité des tokens autorisés
+                for tid in autorises:
+                    if tid < len(logits):
+                        masque[tid] = logits[tid]
+                
+                # Choisir le meilleur mot parmi liste autorisé
+                choix_id = int(np.argmax(masque))
+                texte_choix = self.model.decode([choix_id])
+                
+                # Conditions pour S'ARRETER de générer le paramètre actuel:
+                if not est_nombre and choix_id == self.quote_id:
+                    texte_genere += '"' # Fermer les guillemets
                     input_ids.append(self.quote_id)
-                    generated += '"'
-                    self._advance_param()
-                continue
+                    break
+                    
+                if est_nombre and choix_id in {self.comma_id, self.brace_id}:
+                    if not valeur_courante: # S'il tente de fermer sans rien écrire, forcer 0
+                        texte_genere += "0"
+                        input_ids.extend(self.model.encode("0").tolist()[0])
+                    break
+                
+                # Sinon on ajoute le token à la valeur courante
+                texte_genere += texte_choix
+                valeur_courante += texte_choix
+                input_ids.append(choix_id)
 
-            if param_type == "number":
-                if chosen_id in {self.comma_id, self.close_brace_id}:
-                    if not self._is_number(self.value_buffer):
-                        generated += "0"
-                        for zid in self.model.encode("0").tolist()[0]:
-                            input_ids.append(zid)
-                    self._advance_param()
-                    continue
-
-                input_ids.append(chosen_id)
-                generated += text
-                self.value_buffer += text
-                continue
-
-            input_ids.append(chosen_id)
-            generated += text
-
-        if self.phase != "done":
-            return self._fallback(function_name)
-
+        # --- ETAPE 4: Clôturer proprement et vérifier le JSON ---
+        texte_genere += '}}'
+        
         try:
-            json.loads(generated)
-            return generated
+            json.loads(texte_genere)
+            return texte_genere
         except json.JSONDecodeError:
-            return self._fallback(function_name)
-
-    def _queue_static_tokens(self, function_name: str) -> None:
-        if self.phase == "name_key":
-            self.pending = self.model.encode('{"name": "').tolist()[0]
-            self.phase = "name_value"
-            return
-
-        if self.phase == "name_value":
-            self.pending = self.model.encode(
-                f'{function_name}", "parameters": '
-            ).tolist()[0]
-            self.phase = "params_open"
-            return
-
-        if self.phase == "params_open":
-            if self.param_keys:
-                self.pending = self.model.encode("{").tolist()[0]
-                self.phase = "param_key"
-            else:
-                self.pending = self.model.encode("{}}").tolist()[0]
-                self.phase = "done"
-            return
-
-        if self.phase == "param_key":
-            key = self.param_keys[self.param_index]
-            prefix = ", " if self.param_index > 0 else ""
-            text = f'{prefix}"{key}": '
-            if self._param_type(self.schema[key]) == "string":
-                text += '"'
-            self.pending = self.model.encode(text).tolist()[0]
-            self.value_buffer = ""
-            self.phase = "param_value"
-
-    def _pick_forced(self, logits: list[float], token_id: int) -> int:
-        masked = [-math.inf] * len(logits)
-        if token_id < len(masked):
-            masked[token_id] = 0.0
-        return int(np.argmax(masked))
-
-    def _pick_dynamic(self, logits: list[float], param_type: str) -> int:
-        masked = [-math.inf] * len(logits)
-
-        if param_type == "number":
-            allowed = self.number_ids | {self.comma_id, self.close_brace_id}
-        elif param_type == "string":
-            allowed = set(self.string_ids)
-            allowed.add(self.quote_id)
-        else:
-            raise ValueError(f"type de parametre non supporte: {param_type}")
-
-        for tid in allowed:
-            if tid < len(logits):
-                masked[tid] = logits[tid]
-
-        return int(np.argmax(masked))
-
-    def _advance_param(self) -> None:
-        self.value_buffer = ""
-        self.param_index += 1
-        if self.param_index < len(self.param_keys):
-            self.phase = "param_key"
-        else:
-            self.pending = self.model.encode("}}").tolist()[0]
-            self.phase = "done"
-
-    def _collect_number_tokens(self) -> set[int]:
-        ids: set[int] = set()
-        for text, tid in self.vocab.items():
-            token = (
-                text.decode("utf-8", errors="ignore")
-                if isinstance(text, bytes)
-                else str(text)
-            )
-            token = token.strip("Ġ▁ ▂▃▄▅▆▇█")
-            if token and all(ch in "0123456789.-+eE" for ch in token):
-                ids.add(tid)
-        return ids
-
-    def _collect_string_tokens(self) -> set[int]:
-        ids: set[int] = set()
-        for text, tid in self.vocab.items():
-            token = (
-                text.decode("utf-8", errors="ignore")
-                if isinstance(text, bytes)
-                else str(text)
-            )
-            if tid == self.quote_id:
-                continue
-            if '"' in token or "\\" in token or "<|" in token:
-                continue
-            ids.add(tid)
-        return ids
-
-    def _param_type(self, schema_obj: Any) -> str:
-        if isinstance(schema_obj, dict):
-            return str(schema_obj.get("type", "string"))
-        return str(getattr(schema_obj, "type", "string"))
-
-    def _is_number(self, value: str) -> bool:
-        value = value.strip()
-        if not value:
-            return False
-        return (
-            re.match(
-                r"^[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?$",
-                value,
-            )
-            is not None
-        )
-
-    def _fallback(self, function_name: str) -> str:
-        params: dict[str, Any] = {}
-        for key in self.param_keys:
-            params[key] = (
-                0 if self._param_type(self.schema[key]) == "number" else ""
-            )
-        return json.dumps(
-            {"name": function_name, "parameters": params},
-            ensure_ascii=False,
-        )
+            # Plan de secours ("Fallback") si le JSON est abîmé : on met des valeurs par défaut
+            valeurs_defaut = {k: (0 if any(t in str(v) for t in ["number", "integer", "float"]) else "") for k, v in schema.items()}
+            return json.dumps({"name": function_name, "parameters": valeurs_defaut})

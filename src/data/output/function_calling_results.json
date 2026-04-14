@@ -1,10 +1,10 @@
 [
   {
-    "prompt": "What is the sum of deux and ten?",
+    "prompt": "What is the sum of 2 and 3?",
     "name": "fn_add_numbers",
     "parameters": {
       "a": 2,
-      "b": 10
+      "b": 3
     }
   },
   {
@@ -72,7 +72,7 @@
     "parameters": {
       "source_string": "Programming is fun",
       "regex": "[aeiouAEIOU]",
-      "replacement": ""
+      "replacement": "****"
     }
   },
   {
