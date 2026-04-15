@@ -65,12 +65,16 @@ class ConstrainedDecoder:
         if normalized == "string":
             return "string"
 
-        # Type non reconnu
         msg = (f"Type non supporté : '{raw_type}'. "
                f"Acceptés : number, integer, float, boolean, bool, string")
         raise ValueError(msg)
 
-    def decode(self, prompt_text: str, function_name: str, schema: dict[str, Any]) -> str:
+    def decode(
+        self,
+        prompt_text: str,
+        function_name: str,
+        schema: dict[str, Any],
+    ) -> str:
         """Génère le JSON pas à pas pour la fonction."""
 
         # --- ETAPE 1: Valider et normaliser tous les types ---
@@ -90,7 +94,11 @@ class ConstrainedDecoder:
         # --- ETAPE 2: Initialiser la phrase avec le début du JSON ---
         texte_genere = f'{{"name": "{function_name}", "parameters": {{'
         extract_prompt = "Extract parameters into JSON."
-        phrase_initiale = f"{extract_prompt}\nUser: {prompt_text}\nJSON: {texte_genere}"
+        phrase_initiale = (
+            f"{extract_prompt}\n"
+            f"User: {prompt_text}\n"
+            f"JSON: {texte_genere}"
+        )
         input_ids = self.model.encode(phrase_initiale).tolist()[0]
 
         cles_attendues = list(schema_normalise.keys())
@@ -102,12 +110,15 @@ class ConstrainedDecoder:
             nonlocal number_literal_index
             if number_literal_index >= len(number_literals):
                 return None
-            literal = number_literals[number_literal_index]
+            literal = str(number_literals[number_literal_index])
             number_literal_index += 1
             return literal
 
         def should_use_numeric_fallback() -> bool:
-            """Active le fallback numérique pour les fonctions mathématiques."""
+            """Active le fallback numérique pour les fonctions mathématiques.
+
+            Utilisé pour les fonctions de calcul simples.
+            """
             return function_name in {"fn_add_numbers", "fn_get_square_root"}
 
         # --- ETAPE 3: Générer chaque paramètre un par un ---
@@ -141,13 +152,16 @@ class ConstrainedDecoder:
                     fallback = "0" if est_nombre else ""
                 texte_genere += fallback
                 if fallback:
-                    input_ids.extend(self.model.encode(fallback).tolist()[0])
+                    input_ids.extend(
+                        self.model.encode(fallback).tolist()[0]
+                    )
                 if est_string:
                     texte_genere += '"'
                     input_ids.append(self.quote_id)
                 continue
 
-            # --- ETAPE 4: Laisser le modèle deviner la valeur (avec triche/masque) ---
+            # --- ETAPE 4: Laisser le modèle deviner
+            # la valeur (avec triche/masque) ---
             valeur_courante = ""
             echecs_consecutifs = 0
 
@@ -155,7 +169,8 @@ class ConstrainedDecoder:
             for _ in range(60):
                 logits = self.model.get_logits_from_input_ids(input_ids)
 
-                # Masque : on met toutes les probabilités à "-infini" (interdit)
+                # Masque: on met toutes les probabilités
+                # à "-infini" (interdit)
                 masque = [-math.inf] * len(logits)
 
                 # On autorise seulement la liste qu'on veut
@@ -185,13 +200,16 @@ class ConstrainedDecoder:
 
                 # Si 3 impasses d'affilée, abandon
                 if echecs_consecutifs >= 3:
-                    # On abandonne ce paramètre, on force une valeur par défaut !
+                    # On abandonne ce paramètre,
+                    # on force une valeur par défaut.
                     if est_nombre:
                         fallback = "0"
                         if should_use_numeric_fallback():
                             fallback = next_number_literal() or "0"
                         texte_genere += fallback
-                        input_ids.extend(self.model.encode(fallback).tolist()[0])
+                        input_ids.extend(
+                            self.model.encode(fallback).tolist()[0]
+                        )
                     elif est_boolean:
                         texte_genere += "false"
                         input_ids.extend(
@@ -212,7 +230,10 @@ class ConstrainedDecoder:
 
                 # Conditions pour S'ARRETER de générer le paramètre actuel:
                 if est_string and choix_id == self.quote_id:
-                    if not valeur_courante and should_use_numeric_fallback():
+                    if (
+                        not valeur_courante
+                        and should_use_numeric_fallback()
+                    ):
                         fallback = next_number_literal()
                         if fallback is not None:
                             texte_genere += fallback
@@ -247,7 +268,7 @@ class ConstrainedDecoder:
             return texte_genere
         except json.JSONDecodeError:
             # Fallback avec valeurs par défaut
-            valeurs_defaut = {}
+            valeurs_defaut: dict[str, Any] = {}
             for nom_param, type_norm in schema_normalise.items():
                 if type_norm == "number":
                     valeurs_defaut[nom_param] = 0

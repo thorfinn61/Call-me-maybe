@@ -3,6 +3,7 @@ import json
 import re
 import time
 from pathlib import Path
+from typing import Any
 
 from pydantic import ValidationError
 
@@ -13,8 +14,11 @@ from src.function_selector import select_function
 from src.models import FunctionDefinition, PromptInput
 
 
-def _fix_regex_parameters(prompt: str, params: dict) -> dict:
-    """Correction manuelle : le modèle est trop petit pour écrire des Regex lui-même."""
+def _fix_regex_parameters(
+    prompt: str,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """Correction manuelle pour les Regex du petit modèle."""
     out = dict(params)
 
     # 1. Retrouver ce qu'il faut modifier (la source) dans les guillemets
@@ -35,21 +39,27 @@ def _fix_regex_parameters(prompt: str, params: dict) -> dict:
     elif "vowels" in low:
         out["regex"] = r"[aeiouAEIOU]"
         cible = re.search(
-            r"\bwith\s+['\"]([^'\"]+)['\"]\s+in\b", prompt, flags=re.IGNORECASE)
+            r"\bwith\s+['\"]([^'\"]+)['\"]\s+in\b",
+            prompt,
+            flags=re.IGNORECASE,
+        )
         if cible:
             out["replacement"] = cible.group(1)
 
     elif "cat" in low and "substitute" in low:
         out["regex"] = r"cat"
         cible = re.search(
-            r"\bwith\s+['\"]([^'\"]+)['\"]\s+in\b", prompt, flags=re.IGNORECASE)
+            r"\bwith\s+['\"]([^'\"]+)['\"]\s+in\b",
+            prompt,
+            flags=re.IGNORECASE,
+        )
         if cible:
             out["replacement"] = cible.group(1)
 
     return out
 
 
-def parse_args():
+def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Function calling")
     parser.add_argument("--functions_definition",
                         default="src/data/input/functions_definition.json")
@@ -60,21 +70,57 @@ def parse_args():
     return parser.parse_args()
 
 
-def main():
+def _format_validation_error(err: ValidationError, data_name: str) -> str:
+    """Construit un message lisible à partir d'une ValidationError."""
+    details = []
+    for item in err.errors():
+        loc = item.get("loc", ())
+        msg = item.get("msg", "erreur de validation")
+
+        if len(loc) >= 2 and isinstance(loc[0], int):
+            index = loc[0]
+            field = ".".join(str(part) for part in loc[1:])
+            details.append(
+                f"- {data_name}[{index}].{field}: {msg}"
+            )
+        else:
+            field = ".".join(str(part) for part in loc) if loc else data_name
+            details.append(f"- {field}: {msg}")
+
+    joined = "\n".join(details)
+    return (
+        f"❌ Arrêt du programme : format invalide dans {data_name}.\n"
+        f"Détails:\n{joined}"
+    )
+
+
+def main() -> None:
     start_time = time.perf_counter()
     args = parse_args()
     print("🚀 Lancement du Constrained Decoding Runner...")
 
-    # 1. Charger les données (Pydantic verifie la validité des JSON automatiquement)
+    # 1. Charger les données (Pydantic valide automatiquement)
     raw_functions = load_json(args.functions_definition)
     raw_prompts = load_json(args.input)
 
     if raw_functions is None or raw_prompts is None:
-        print("❌ Arrêt du programme : Impossible de continuer avec un fichier JSON invalide ou manquant.")
+        print(
+            "❌ Arrêt du programme : Impossible de continuer avec "
+            "un fichier JSON invalide ou manquant."
+        )
         return
 
-    functions = [FunctionDefinition(**item) for item in raw_functions]
-    prompts = [PromptInput(**item) for item in raw_prompts]
+    try:
+        functions = [FunctionDefinition(**item) for item in raw_functions]
+    except ValidationError as err:
+        print(_format_validation_error(err, "functions_definition"))
+        return
+
+    try:
+        prompts = [PromptInput(**item) for item in raw_prompts]
+    except ValidationError as err:
+        print(_format_validation_error(err, "input_prompts"))
+        return
 
     # 2. Initialiser le modèle d'IA et le décodeur
     model = Small_LLM_Model()
@@ -90,11 +136,15 @@ def main():
         func = next((f for f in functions if f.name == chosen_name), None)
 
         if not func:
-            print(f"[{i}/{len(prompts)}] ❌ Fonction introuvable: {chosen_name}")
+            print(
+                f"[{i}/{len(prompts)}] ❌ Fonction introuvable: "
+                f"{chosen_name}"
+            )
             continue
 
         try:
-            # Forcer le modèle à générer un JSON valide qui respecte les paramètres
+            # Forcer le modèle à générer un JSON valide
+            # qui respecte les paramètres
             raw_json_str = decoder.decode(
                 prompt_text, func.name, func.parameters)
             parsed_data = json.loads(raw_json_str)
@@ -113,7 +163,10 @@ def main():
             print(f"[{i}/{len(prompts)}] ✅ Succès ({func.name})")
 
         except Exception as e:
-            print(f"[{i}/{len(prompts)}] ❌ Erreur pendant le décodage: {e}")
+            print(
+                f"[{i}/{len(prompts)}] ❌ Erreur pendant "
+                f"le décodage: {e}"
+            )
 
     # 4. Sauvegarder les résultats finaux
     out_path = Path(args.output)
@@ -122,7 +175,8 @@ def main():
         json.dump(output, f, indent=2, ensure_ascii=False)
 
     print(f"🎉 Terminé ! Les résultats sont dans {args.output}")
-    print(f"⏱️ Temps total : {time.perf_counter() - start_time:.2f}s")
+    elapsed = time.perf_counter() - start_time
+    print(f"⏱️ Temps total : {elapsed:.2f}s")
 
 
 if __name__ == "__main__":

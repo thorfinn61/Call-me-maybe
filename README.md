@@ -1,30 +1,161 @@
-# Résumé du Projet : Call Me Maybe (Function Calling)
+*This project has been created as part of the 42 curriculum by elsahin.*
 
-## But du Projet
+# Call me maybe
 
-Ce projet a pour but de vous apprendre à implémenter un système de **Function Calling** (Appel de fonction) en utilisant un "petit" modèle de langage (Large Language Model - Qwen3-0.6B).
+## Description
+Ce projet implemente un pipeline de function calling base sur un petit modele de langage, avec une generation JSON controlee par constrained decoding.
 
-Habituellement, quand on demande à un LLM de lire une commande (ex: "Combien font 40 + 2 ?") et de renvoyer un format strict (comme un JSON avec le nom de la fonction et ses arguments), les petits modèles se trompent très souvent sur la syntaxe.
+Objectif principal:
+- lire un prompt utilisateur,
+- selectionner la fonction la plus pertinente,
+- generer un JSON valide avec les parametres,
+- garantir la robustesse face aux erreurs de schema et d'entree.
 
-Votre mission est de corriger ce problème en utilisant une technique appelée **Décodage Contraint (Constrained Decoding)**. Au lieu de laisser le modèle deviner le JSON, vous allez intervenir lors de la génération de chaque mot/morceau de mot (token). En modifiant les probabilités (logits) retournées par le modèle, vous allez littéralement "forcer" le modèle à n'écrire que du JSON 100% valide qui respecte la structure (le schéma) que vous attendez.
+Le coeur du projet est dans [src/constrained_decoder.py](src/constrained_decoder.py), avec orchestration CLI dans [src/__main__.py](src/__main__.py).
 
-## Règles Importantes
+## Instructions
+### Prerequis
+- Python 3.13+
+- `uv` installe
 
-- **Librairies autorisées :** `numpy`, `pydantic`, `json`.
-- **Interdit :** Utiliser des librairies de Machine Learning lourdes comme `pytorch`, `transformers`, `huggingface`, etc.
-- Vous devez utiliser le package interne `llm_sdk` fourni avec le projet.
-- La validation des données doit obligatoirement passer par `pydantic`.
-- Tolérance zéro pour les plantages (crash) : votre code doit gérer toutes les erreurs proprement.
+### Installation
+```bash
+make install
+```
 
----
+### Execution
+```bash
+make run
+```
 
-## Todo-Liste
+### Execution avec options
+```bash
+uv run python -m src \
+  --functions_definition src/data/input/functions_definition.json \
+  --input src/data/input/function_calling_tests.json \
+  --output src/data/output/function_calling_results.json
+```
 
-- [x] **Étape 1 : Environnement** - Initialiser le projet avec `uv` (installer numpy, pydantic). _(Fait !)_
-- [x] **Étape 2 : Makefile** - Créer les règles `install`, `run`, `debug`, `clean`, et `lint` (avec un typage strict). _(Fait !)_
-- [ ] **Étape 3 : Interface en Ligne de Commande (CLI)** - Dans `src/__main__.py`, utiliser `argparse` pour lire les arguments `--functions_definition`, `--input`, `--output`. Gérer les erreurs de fichiers.
-- [ ] **Étape 4 : Modèles de données (Pydantic)** - Dans `src/data_models.py`, créer des classes Pydantic pour représenter la structure attendue des fonctions (nom, paramètres, types).
-- [ ] **Étape 5 : Cartographie du Vocabulaire (Tokens)** - Écrire une logique pour lire le fichier contenant le vocabulaire du modèle, afin de savoir à quel texte correspond chaque "Token ID".
-- [ ] **Étape 6 : Cœur du projet (Décodage Contraint)** - Implémenter la logique qui intercepte les logits (probabilités) du modèle (`Small_LLM_Model`), et met à `-inf` (probabilité nulle) tous les tokens qui casseraient le format JSON ou le schéma Pydantic de la fonction.
-- [ ] **Étape 7 : Boucle principale** - Lire les questions depuis le fichier d'entrée, faire générer le JSON par votre système, le valider, puis l'écrire dans le fichier de sortie.
-- [ ] **Étape 8 : Finitions & Linting** - S'assurer que les commandes `make lint` passent sans erreur (mypy, flake8).
+### Debug
+```bash
+make debug
+```
+
+### Qualite de code
+```bash
+make lint
+```
+
+### Nettoyage
+```bash
+make clean
+```
+
+## Algorithm explanation
+Approche de constrained decoding utilisee:
+
+1. Initialisation
+- chargement du vocabulaire token du modele,
+- construction de 2 ensembles de tokens: nombres (`number_ids`) et texte (`string_ids`),
+- memorisation des tokens de structure JSON (`"`, `,`, `}`).
+
+2. Validation du schema d'entree
+- chaque type de parametre est normalise (`number`, `integer`, `float`, `boolean`, `bool`, `string`),
+- tout type non supporte declenche une erreur immediate (`ValueError`) avec contexte du parametre.
+
+3. Generation parametre par parametre
+- pour chaque cle du schema, le decodeur force la forme JSON attendue,
+- a chaque step, un masque de logits est applique:
+  - type `number`: seuls tokens numeriques + tokens de fermeture sont autorises,
+  - type `boolean`: tokens texte + tokens de fermeture,
+  - type `string`: tokens texte + guillemet de fermeture.
+
+4. Strategie d'arret et fallback
+- un compteur d'impasse evite les boucles longues,
+- apres plusieurs logits invalides consecutifs, fallback sur valeur par defaut,
+- verification finale via `json.loads`, puis fallback global si JSON invalide.
+
+5. Robustesse metier supplementaire
+- cas regex: post-traitement de [src/__main__.py](src/__main__.py) pour corriger les parametres de substitution,
+- cas prompts mathematiques: extraction des litteraux numeriques dans le prompt pour stabiliser la sortie.
+
+## Design decisions
+Choix principaux:
+
+- Pydantic pour valider les fichiers d'entree et garantir un schema strict.
+- `extra="forbid"` dans [src/models.py](src/models.py) pour refuser les fautes de frappe (`ss`, `paramters`, etc.).
+- Arret propre sur erreur de validation dans [src/__main__.py](src/__main__.py), avec message lisible plutot qu'un crash brut.
+- Separation nette des responsabilites:
+  - selection de fonction dans [src/function_selector.py](src/function_selector.py),
+  - decoding contraint dans [src/constrained_decoder.py](src/constrained_decoder.py),
+  - I/O JSON dans [src/file_handler.py](src/file_handler.py).
+
+## Performance analysis
+### Accuracy
+- bonne adherence au schema JSON pour les cas testes,
+- meilleure robustesse quand les types sont valides,
+- comportement protege par validation stricte quand le schema est invalide.
+
+### Speed
+- affichage du temps total d'execution dans [src/__main__.py](src/__main__.py),
+- generation token-by-token plus lente qu'une generation libre, mais necessaire pour la contrainte forte.
+
+### Reliability
+- validation des inputs avant inference,
+- gestion explicite des erreurs de parsing/validation,
+- fallback JSON pour limiter les crashes.
+
+## Challenges faced
+Problemes rencontres et resolutions:
+
+- Boucles longues / generation incoherente
+  - resolution: limites de generation et strategie de fallback.
+
+- Erreurs silencieuses de schema (`name` renomme, `parameters` mal ecrit)
+  - resolution: modeles Pydantic stricts avec `extra="forbid"` et champs obligatoires.
+
+- Variabilite du petit modele sur certains prompts
+  - resolution: post-traitement cible (regex) et extraction numerique pour les cas mathematiques.
+
+## Testing strategy
+Strategie de validation:
+
+- tests fonctionnels via le dataset de prompts dans [src/data/input/function_calling_tests.json](src/data/input/function_calling_tests.json),
+- verification des sorties dans [src/data/output/function_calling_results.json](src/data/output/function_calling_results.json),
+- validation statique avec `flake8` et `mypy --strict` (`make lint`),
+- tests de robustesse manuels en injectant des schemas invalides (ex: `ss` au lieu de `name`, `paramters` au lieu de `parameters`).
+
+## Example usage
+### Cas nominal
+```bash
+make run
+```
+
+Exemple de log:
+```text
+🚀 Lancement du Constrained Decoding Runner...
+[1/11] ✅ Succès (...)
+...
+🎉 Terminé ! Les résultats sont dans src/data/output/function_calling_results.json
+⏱️ Temps total : 153.12s
+```
+
+### Cas schema invalide
+Si `functions_definition.json` contient une faute de cle (ex: `ss` ou `paramters`), le programme affiche une erreur de validation claire puis s'arrete proprement.
+
+## Resources
+References classiques:
+- JSON Specification: https://www.rfc-editor.org/rfc/rfc8259
+- Pydantic documentation: https://docs.pydantic.dev/
+- Python `argparse`: https://docs.python.org/3/library/argparse.html
+- Python `json`: https://docs.python.org/3/library/json.html
+- Constrained decoding (overview):
+  - https://huggingface.co/blog/constrained-beam-search
+  - https://arxiv.org/abs/2307.09702 (structured generation context)
+
+Utilisation de l'IA dans ce projet:
+- assistance pour refactoring du decodeur et clarification de la logique,
+- aide a la mise en place de la gestion d'erreurs et des messages utilisateur,
+- aide ponctuelle sur linting/typing et reformulation de documentation.
+
+L'implementation finale, les choix techniques et les validations ont ete verifies et ajustes dans le code du repository.
