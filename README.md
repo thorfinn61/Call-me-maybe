@@ -156,6 +156,7 @@ References classiques:
 Utilisation de l'IA dans ce projet:
 - assistance pour refactoring du decodeur et clarification de la logique,
 - aide a la mise en place de la gestion d'erreurs et des messages utilisateur,
+- aide pour le constrained decoding
 - aide ponctuelle sur linting/typing et reformulation de documentation.
 
 L'implementation finale, les choix techniques et les validations ont ete verifies et ajustes dans le code du repository.
